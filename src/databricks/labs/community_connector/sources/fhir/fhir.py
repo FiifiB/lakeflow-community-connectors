@@ -90,6 +90,20 @@ class FhirLakeflowConnect(LakeflowConnect):
         if not records:
             return iter([]), start_offset or {}
 
+        # Detect if server ignored the _lastUpdated filter.
+        # If since was set but no records have lastUpdated > since, the server likely
+        # doesn't support _lastUpdated filtering. Raise to surface this early.
+        if since and records:
+            newer = [r for r in records if r.get(CURSOR_FIELD) and r[CURSOR_FIELD] > since]
+            if not newer:
+                raise RuntimeError(
+                    f"FHIR server appears to have ignored the '_lastUpdated=gt{since}' filter — "
+                    f"all {len(records)} returned records for '{table_name}' have "
+                    f"lastUpdated <= '{since}'. "
+                    f"This server may not support the _lastUpdated search parameter. "
+                    f"See README.md for server requirements."
+                )
+
         # Advance cursor to max lastUpdated across batch.
         # ISO8601 string comparison is correct for FHIR instants (always timezone-qualified).
         cursors = [r[CURSOR_FIELD] for r in records if r.get(CURSOR_FIELD)]
