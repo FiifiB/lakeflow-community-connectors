@@ -20,6 +20,8 @@ def make_client():
         private_key_pem=config.get("private_key_pem", ""),
         client_secret=config.get("client_secret", ""),
         scope=config.get("scope", ""),
+        kid=config.get("kid", ""),
+        private_key_algorithm=config.get("private_key_algorithm", "RS384"),
     )
     return FhirHttpClient(base_url=config["base_url"], auth_client=auth)
 
@@ -174,6 +176,22 @@ def test_jwt_assertion_uses_configured_algorithm():
     call_args = mock_jwt.encode.call_args
     algorithm_used = call_args.kwargs.get("algorithm") or (call_args.args[2] if len(call_args.args) > 2 else None)
     assert algorithm_used == "ES384", f"Expected ES384, got {algorithm_used}"
+
+
+def test_jwt_assertion_rejects_unsupported_algorithm():
+    """Unsupported algorithm must raise ValueError at construction time."""
+    try:
+        SmartAuthClient(
+            token_url="https://auth.example.com/token",
+            client_id="my-client",
+            auth_type="jwt_assertion",
+            kid="k1",
+            private_key_algorithm="RS256",
+        )
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "RS256" in str(e)
+        assert "RS384" in str(e)
 
 
 def test_client_secret_uses_http_basic_auth():

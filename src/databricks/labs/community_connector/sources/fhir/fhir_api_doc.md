@@ -32,10 +32,11 @@ Sign with PEM private key using `private_key_algorithm` (`RS384` default; `ES384
 
 If `kid` is not provided, a `ValueError` is raised — `kid` must match the key registered in the FHIR server's JWK Set.
 
-Required connection parameters: `base_url`, `client_id`, `private_key_pem`, `kid`, `scope`
+Required connection parameters: `base_url`, `client_id`, `private_key_pem`, `kid`
 (plus `token_url` or auto-discovery).
 
-Optional connection parameters: `private_key_algorithm` (default: `RS384`).
+Optional connection parameters: `scope` (strongly recommended — FHIR servers typically require it),
+`private_key_algorithm` (default: `RS384`).
 
 Token response: `{"access_token": "...", "token_type": "bearer", "expires_in": 300}`
 
