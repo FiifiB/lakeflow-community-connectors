@@ -47,6 +47,15 @@ class SmartAuthClient:
         self._access_token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
 
+        if auth_type == "jwt_assertion":
+            _SUPPORTED_ALGORITHMS = {"RS384", "ES384"}
+            if private_key_algorithm not in _SUPPORTED_ALGORITHMS:
+                raise ValueError(
+                    f"private_key_algorithm {private_key_algorithm!r} is not supported. "
+                    f"Use one of: {sorted(_SUPPORTED_ALGORITHMS)}. "
+                    f"Per the SMART on FHIR Backend Services spec, clients SHALL support RS384 and ES384."
+                )
+
     def get_token(self) -> str:
         if self._auth_type == "none":
             return ""
