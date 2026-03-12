@@ -59,17 +59,22 @@ class SmartAuthClient:
     def _refresh_token(self) -> None:
         if self._auth_type == "jwt_assertion":
             data = self._jwt_assertion_data()
+            resp = requests.post(
+                self._token_url, data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=TOKEN_TIMEOUT,
+            )
         elif self._auth_type == "client_secret":
             data = self._client_secret_data()
+            resp = requests.post(
+                self._token_url, data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                auth=(self._client_id, self._client_secret),
+                timeout=TOKEN_TIMEOUT,
+            )
         else:
             raise ValueError(f"Unsupported auth_type: {self._auth_type!r}. "
                              f"Use 'jwt_assertion', 'client_secret', or 'none'.")
-
-        resp = requests.post(
-            self._token_url, data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=TOKEN_TIMEOUT,
-        )
         if resp.status_code != 200:
             raise RuntimeError(f"SMART token request failed (HTTP {resp.status_code}): {resp.text}")
         body = resp.json()
@@ -103,8 +108,6 @@ class SmartAuthClient:
     def _client_secret_data(self) -> dict:
         data = {
             "grant_type": "client_credentials",
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
         }
         if self._scope:
             data["scope"] = self._scope
