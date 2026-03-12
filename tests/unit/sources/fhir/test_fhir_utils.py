@@ -174,3 +174,33 @@ def test_jwt_assertion_uses_configured_algorithm():
     call_args = mock_jwt.encode.call_args
     algorithm_used = call_args.kwargs.get("algorithm") or (call_args.args[2] if len(call_args.args) > 2 else None)
     assert algorithm_used == "ES384", f"Expected ES384, got {algorithm_used}"
+
+
+def test_client_secret_uses_http_basic_auth():
+    """
+    SMART client-confidential-symmetric spec requires HTTP Basic auth.
+    client_id and client_secret must NOT appear in the POST body.
+    """
+    from unittest.mock import patch, MagicMock
+    auth = SmartAuthClient(
+        token_url="https://auth.example.com/token",
+        client_id="my-app",
+        auth_type="client_secret",
+        client_secret="my-secret",
+        scope="system/*.rs",
+    )
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"access_token": "tok", "expires_in": 300}
+
+    with patch("databricks.labs.community_connector.sources.fhir.fhir_utils.requests.post",
+               return_value=mock_response) as mock_post:
+        auth._refresh_token()
+
+    call_kwargs = mock_post.call_args.kwargs
+    assert "auth" in call_kwargs, "requests.post must use auth= kwarg for HTTP Basic"
+    assert call_kwargs["auth"] == ("my-app", "my-secret"), \
+        "auth tuple must be (client_id, client_secret)"
+    post_data = call_kwargs.get("data", {})
+    assert "client_id" not in post_data, "client_id must not be in POST body"
+    assert "client_secret" not in post_data, "client_secret must not be in POST body"
