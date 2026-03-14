@@ -76,8 +76,8 @@ RESOURCE_SCHEMAS: dict[str, StructType] = {
     ),
     "Coverage": _s(
         _f("status", StringType()), _f("beneficiary_reference", StringType()),
-        _f("payor_reference", StringType()), _f("period_start", StringType()),
-        _f("period_end", StringType()),
+        _f("payor_reference", StringType()), _f("period_start", TimestampType()),
+        _f("period_end", TimestampType()),
     ),
     "CarePlan": _s(
         _f("status", StringType()), _f("intent", StringType()),
