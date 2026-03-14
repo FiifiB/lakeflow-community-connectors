@@ -68,22 +68,19 @@ class SmartAuthClient:
     def _refresh_token(self) -> None:
         if self._auth_type == "jwt_assertion":
             data = self._jwt_assertion_data()
-            resp = requests.post(
-                self._token_url, data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=TOKEN_TIMEOUT,
-            )
+            post_kwargs: dict = {}
         elif self._auth_type == "client_secret":
             data = self._client_secret_data()
-            resp = requests.post(
-                self._token_url, data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                auth=(self._client_id, self._client_secret),
-                timeout=TOKEN_TIMEOUT,
-            )
+            post_kwargs = {"auth": (self._client_id, self._client_secret)}
         else:
             raise ValueError(f"Unsupported auth_type: {self._auth_type!r}. "
                              f"Use 'jwt_assertion', 'client_secret', or 'none'.")
+        resp = requests.post(
+            self._token_url, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=TOKEN_TIMEOUT,
+            **post_kwargs,
+        )
         if resp.status_code != 200:
             raise RuntimeError(f"SMART token request failed (HTTP {resp.status_code}): {resp.text}")
         body = resp.json()
@@ -175,9 +172,9 @@ class FhirHttpClient:
 
     def get(self, resource_type: str, params: Optional[dict] = None) -> requests.Response:
         url = urljoin(self._base_url, resource_type)
-        return self._get_url(url, params=params)
+        return self.get_url(url, params=params)
 
-    def _get_url(self, url: str, params: Optional[dict] = None) -> requests.Response:
+    def get_url(self, url: str, params: Optional[dict] = None) -> requests.Response:
         backoff = INITIAL_BACKOFF
         for attempt in range(MAX_RETRIES):
             resp = self._session.get(url, params=params, headers=self._headers(), timeout=HTTP_TIMEOUT)
@@ -209,6 +206,7 @@ def iter_bundle_pages(
     resource_type: str,
     params: Optional[dict] = None,
     max_records: Optional[int] = None,
+    page_delay: float = PAGE_DELAY,
 ) -> Iterator[dict]:
     """Yield FHIR resources from a paginated search, following Bundle next links."""
     count = 0
@@ -236,8 +234,9 @@ def iter_bundle_pages(
         if not next_url:
             return
 
-        time.sleep(PAGE_DELAY)  # avoid overwhelming public FHIR servers
-        resp = client._get_url(next_url)
+        if page_delay > 0:
+            time.sleep(page_delay)
+        resp = client.get_url(next_url)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"FHIR pagination failed for {resource_type} (HTTP {resp.status_code}): {resp.text}"

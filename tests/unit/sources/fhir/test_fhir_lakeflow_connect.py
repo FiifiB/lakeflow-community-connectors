@@ -1,5 +1,11 @@
 """Integration test for FhirLakeflowConnect using LakeflowConnectTester.
-Runs against the public HAPI FHIR R4 server (https://hapi.fhir.org/baseR4).
+
+Runs against whatever FHIR server is configured in:
+    tests/unit/sources/fhir/configs/dev_config.json
+
+The default config points at the public HAPI FHIR R4 server (auth_type=none).
+To test against a SMART-enabled server, replace dev_config.json with your
+SMART credentials (see README.md Authentication Setup, or run authenticate.py).
 """
 from pathlib import Path
 

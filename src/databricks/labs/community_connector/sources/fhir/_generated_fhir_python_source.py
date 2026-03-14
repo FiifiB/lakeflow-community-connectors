@@ -8,8 +8,11 @@
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Iterator, Optional
+import argparse
 import json
+import sys
 import time
 
 from pyspark.sql import Row
@@ -17,6 +20,7 @@ from pyspark.sql.datasource import DataSource, DataSourceReader, SimpleDataSourc
 from urllib.parse import urljoin
 from pyspark.sql.types import *
 import base64
+import jwt
 import requests
 import uuid
 
@@ -366,10 +370,10 @@ def register_lakeflow_source(spark):
 
     CURSOR_FIELD = "lastUpdated"
 
-    RETRIABLE_STATUS_CODES = {429, 500, 503}
+    RETRIABLE_STATUS_CODES = {429, 500, 502, 503}  # 502 common on Azure Health Data Services and AWS HealthLake
     MAX_RETRIES = 5
     INITIAL_BACKOFF = 5.0  # seconds; doubled after each retry (5→10→20→40→80)
-    PAGE_DELAY = 1.0       # seconds to sleep between paginated requests (reduces server load)
+    PAGE_DELAY = 0.0       # seconds to sleep between paginated requests; set to 1.0 for public servers
     HTTP_TIMEOUT = 60   # seconds; timeout for FHIR API requests
     TOKEN_TIMEOUT = 30  # seconds; timeout for OAuth2 token requests
 
@@ -444,8 +448,8 @@ def register_lakeflow_source(spark):
         ),
         "Coverage": _s(
             _f("status", StringType()), _f("beneficiary_reference", StringType()),
-            _f("payor_reference", StringType()), _f("period_start", StringType()),
-            _f("period_end", StringType()),
+            _f("payor_reference", StringType()), _f("period_start", TimestampType()),
+            _f("period_end", TimestampType()),
         ),
         "CarePlan": _s(
             _f("status", StringType()), _f("intent", StringType()),
@@ -486,15 +490,27 @@ def register_lakeflow_source(spark):
         """
 
         def __init__(self, token_url: str, client_id: str, auth_type: str,
-                     private_key_pem: str = "", client_secret: str = "", scope: str = "") -> None:
+                     private_key_pem: str = "", client_secret: str = "", scope: str = "",
+                     kid: str = "", private_key_algorithm: str = "RS384") -> None:
             self._token_url = token_url
             self._client_id = client_id
             self._auth_type = auth_type
             self._private_key_pem = private_key_pem
             self._client_secret = client_secret
             self._scope = scope
+            self._kid = kid
+            self._private_key_algorithm = private_key_algorithm
             self._access_token: Optional[str] = None
             self._expires_at: Optional[datetime] = None
+
+            if auth_type == "jwt_assertion":
+                _SUPPORTED_ALGORITHMS = {"RS384", "ES384"}
+                if private_key_algorithm not in _SUPPORTED_ALGORITHMS:
+                    raise ValueError(
+                        f"private_key_algorithm {private_key_algorithm!r} is not supported. "
+                        f"Use one of: {sorted(_SUPPORTED_ALGORITHMS)}. "
+                        f"Per the SMART on FHIR Backend Services spec, clients SHALL support RS384 and ES384."
+                    )
 
         def get_token(self) -> str:
             if self._auth_type == "none":
@@ -508,16 +524,18 @@ def register_lakeflow_source(spark):
         def _refresh_token(self) -> None:
             if self._auth_type == "jwt_assertion":
                 data = self._jwt_assertion_data()
+                post_kwargs: dict = {}
             elif self._auth_type == "client_secret":
                 data = self._client_secret_data()
+                post_kwargs = {"auth": (self._client_id, self._client_secret)}
             else:
                 raise ValueError(f"Unsupported auth_type: {self._auth_type!r}. "
                                  f"Use 'jwt_assertion', 'client_secret', or 'none'.")
-
             resp = requests.post(
                 self._token_url, data=data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=TOKEN_TIMEOUT,
+                **post_kwargs,
             )
             if resp.status_code != 200:
                 raise RuntimeError(f"SMART token request failed (HTTP {resp.status_code}): {resp.text}")
@@ -527,14 +545,19 @@ def register_lakeflow_source(spark):
             self._expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
 
         def _jwt_assertion_data(self) -> dict:
-            import jwt  # PyJWT
-
             now = datetime.now(timezone.utc)
             payload = {
                 "iss": self._client_id, "sub": self._client_id, "aud": self._token_url,
                 "jti": str(uuid.uuid4()), "iat": now, "exp": now + timedelta(minutes=5),
             }
-            assertion = jwt.encode(payload, self._private_key_pem, algorithm="RS256")
+            if not self._kid:
+                raise ValueError(
+                    "kid is required for jwt_assertion auth. "
+                    "Provide the key ID (kid) that identifies the private key "
+                    "registered with the FHIR server's JWK Set."
+                )
+            jwt_headers = {"kid": self._kid, "typ": "JWT"}
+            assertion = jwt.encode(payload, self._private_key_pem, algorithm=self._private_key_algorithm, headers=jwt_headers)
             data = {
                 "grant_type": "client_credentials",
                 "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
@@ -545,14 +568,43 @@ def register_lakeflow_source(spark):
             return data
 
         def _client_secret_data(self) -> dict:
-            data = {
-                "grant_type": "client_credentials",
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-            }
+            # client_id and client_secret are NOT included in the POST body.
+            # Per SMART client-confidential-symmetric spec, they are passed via
+            # HTTP Basic auth (Authorization: Basic B64(client_id:client_secret)).
+            data = {"grant_type": "client_credentials"}
             if self._scope:
                 data["scope"] = self._scope
             return data
+
+
+    def discover_token_url(base_url: str) -> str:
+        """Fetch the OAuth2 token endpoint from the FHIR server's SMART configuration.
+
+        Per SMART on FHIR Backend Services spec, servers publish their OAuth endpoints at:
+        {base_url}/.well-known/smart-configuration
+
+        Returns the token_endpoint URL.
+        Raises RuntimeError if discovery fails or token_endpoint is absent.
+        """
+        discovery_url = base_url.rstrip("/") + "/.well-known/smart-configuration"
+        resp = requests.get(
+            discovery_url,
+            headers={"Accept": "application/json"},
+            timeout=TOKEN_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"SMART configuration discovery failed (HTTP {resp.status_code}) at {discovery_url}: "
+                f"{resp.text}"
+            )
+        config = resp.json()
+        token_endpoint = config.get("token_endpoint")
+        if not token_endpoint:
+            raise RuntimeError(
+                f"SMART configuration at {discovery_url} does not contain 'token_endpoint'. "
+                f"Keys present: {list(config.keys())}"
+            )
+        return token_endpoint
 
 
     class FhirHttpClient:
@@ -576,9 +628,9 @@ def register_lakeflow_source(spark):
 
         def get(self, resource_type: str, params: Optional[dict] = None) -> requests.Response:
             url = urljoin(self._base_url, resource_type)
-            return self._get_url(url, params=params)
+            return self.get_url(url, params=params)
 
-        def _get_url(self, url: str, params: Optional[dict] = None) -> requests.Response:
+        def get_url(self, url: str, params: Optional[dict] = None) -> requests.Response:
             backoff = INITIAL_BACKOFF
             for attempt in range(MAX_RETRIES):
                 resp = self._session.get(url, params=params, headers=self._headers(), timeout=HTTP_TIMEOUT)
@@ -610,6 +662,7 @@ def register_lakeflow_source(spark):
         resource_type: str,
         params: Optional[dict] = None,
         max_records: Optional[int] = None,
+        page_delay: float = PAGE_DELAY,
     ) -> Iterator[dict]:
         """Yield FHIR resources from a paginated search, following Bundle next links."""
         count = 0
@@ -637,8 +690,9 @@ def register_lakeflow_source(spark):
             if not next_url:
                 return
 
-            time.sleep(PAGE_DELAY)  # avoid overwhelming public FHIR servers
-            resp = client._get_url(next_url)
+            if page_delay > 0:
+                time.sleep(page_delay)
+            resp = client.get_url(next_url)
             if resp.status_code != 200:
                 raise RuntimeError(
                     f"FHIR pagination failed for {resource_type} (HTTP {resp.status_code}): {resp.text}"
@@ -854,6 +908,104 @@ def register_lakeflow_source(spark):
 
 
     ########################################################
+    # src/databricks/labs/community_connector/sources/fhir/validate_auth.py
+    ########################################################
+
+    def validate(config: dict) -> None:
+        auth_type = config.get("auth_type", "none")
+        base_url = config.get("base_url", "").rstrip("/")
+
+        if not base_url:
+            _fail("'base_url' is required in config.")
+
+        print(f"  base_url   : {base_url}")
+        print(f"  auth_type  : {auth_type}")
+
+        # Step 1: Resolve token URL (or skip for none)
+        token_url = config.get("token_url", "").strip()
+        if auth_type != "none" and not token_url:
+            print("\n[1/3] Discovering token endpoint via .well-known/smart-configuration ...")
+            try:
+                token_url = discover_token_url(base_url)
+                print(f"  token_url  : {token_url}  (auto-discovered)")
+            except RuntimeError as exc:
+                _fail(f"Token endpoint discovery failed:\n  {exc}")
+        elif token_url:
+            print(f"  token_url  : {token_url}")
+
+        # Step 2: Obtain an access token
+        if auth_type != "none":
+            print(f"\n[2/3] Requesting access token ({auth_type}) ...")
+            auth_client = SmartAuthClient(
+                token_url=token_url,
+                client_id=config.get("client_id", ""),
+                auth_type=auth_type,
+                private_key_pem=config.get("private_key_pem", ""),
+                client_secret=config.get("client_secret", ""),
+                scope=config.get("scope", ""),
+                kid=config.get("kid", ""),
+                private_key_algorithm=config.get("private_key_algorithm", "RS384"),
+            )
+            try:
+                token = auth_client.get_token()
+            except (RuntimeError, ValueError) as exc:
+                _fail(f"Token request failed:\n  {exc}")
+            print(f"  access token obtained  ({len(token)} chars)")
+        else:
+            print("\n[2/3] auth_type=none — skipping token request.")
+            auth_client = SmartAuthClient(
+                token_url="", client_id="", auth_type="none",
+            )
+
+        # Step 3: Hit the FHIR server metadata endpoint to confirm connectivity
+        print("\n[3/3] Confirming FHIR server connectivity (GET /metadata) ...")
+        client = FhirHttpClient(base_url=base_url, auth_client=auth_client)
+        resp = client.get("metadata")
+        if resp.status_code != 200:
+            _fail(
+                f"GET {base_url}/metadata returned HTTP {resp.status_code}.\n"
+                f"  Response: {resp.text[:300]}"
+            )
+        body = resp.json()
+        fhir_version = body.get("fhirVersion", "unknown")
+        software = body.get("software", {}).get("name", "unknown")
+        print(f"  FHIR version : {fhir_version}")
+        print(f"  Server       : {software}")
+
+        print("\n✓ Credentials validated successfully. The connector can reach the FHIR server.\n")
+
+
+    def _fail(message: str) -> None:
+        print(f"\n✗ Validation failed: {message}\n", file=sys.stderr)
+        sys.exit(1)
+
+
+    def main() -> None:
+        parser = argparse.ArgumentParser(
+            description="Validate FHIR connector credentials against a real FHIR server."
+        )
+        parser.add_argument(
+            "--config", required=True,
+            help="Path to dev_config.json produced by authenticate.py",
+        )
+        args = parser.parse_args()
+
+        config_path = Path(args.config)
+        if not config_path.exists():
+            _fail(f"Config file not found: {config_path}")
+
+        with open(config_path) as f:
+            config = json.load(f)
+
+        print(f"\nValidating FHIR credentials from: {config_path}\n")
+        validate(config)
+
+
+    if __name__ == "__main__":
+        main()
+
+
+    ########################################################
     # src/databricks/labs/community_connector/sources/fhir/fhir.py
     ########################################################
 
@@ -863,13 +1015,21 @@ def register_lakeflow_source(spark):
         def __init__(self, options: dict[str, str]) -> None:
             super().__init__(options)
 
+            auth_type = options.get("auth_type", "none")
+            token_url = options.get("token_url", "").strip()
+
+            if not token_url and auth_type != "none":
+                token_url = discover_token_url(options["base_url"])
+
             auth_client = SmartAuthClient(
-                token_url=options.get("token_url", ""),
+                token_url=token_url,
                 client_id=options.get("client_id", ""),
-                auth_type=options.get("auth_type", "none"),
+                auth_type=auth_type,
                 private_key_pem=options.get("private_key_pem", ""),
                 client_secret=options.get("client_secret", ""),
                 scope=options.get("scope", ""),
+                kid=options.get("kid", ""),
+                private_key_algorithm=options.get("private_key_algorithm", "RS384"),
             )
             self._client = FhirHttpClient(base_url=options["base_url"], auth_client=auth_client)
 
@@ -914,28 +1074,30 @@ def register_lakeflow_source(spark):
 
             page_size = int(table_options.get("page_size", str(DEFAULT_PAGE_SIZE)))
             max_records = int(table_options.get("max_records_per_batch", str(DEFAULT_MAX_RECORDS)))
+            page_delay = float(table_options.get("page_delay", str(PAGE_DELAY)))
 
             params: dict[str, str] = {"_count": str(page_size)}
             if since:
                 params["_lastUpdated"] = f"gt{since}"
 
             records = []
-            for resource in iter_bundle_pages(self._client, table_name, params, max_records=max_records):
+            for resource in iter_bundle_pages(self._client, table_name, params, max_records=max_records, page_delay=page_delay):
                 records.append(extract_record(resource, table_name))
 
             if not records:
                 return iter([]), start_offset or {}
 
             # Detect if server ignored the _lastUpdated filter.
-            # If since was set but no records have lastUpdated > since, the server likely
-            # doesn't support _lastUpdated filtering. Raise to surface this early.
+            # Only raise if there are records with a datable lastUpdated AND none of them are
+            # newer than since — that combination is evidence the filter was ignored.
+            # Records with null lastUpdated are excluded from this check (cardinality 0..1 in spec).
             if since:
-                # Exclude records missing lastUpdated — they can't be used to verify filtering.
-                newer = [r for r in records if r.get(CURSOR_FIELD) and r[CURSOR_FIELD] > since]
-                if not newer:
+                has_datable = [r for r in records if r.get(CURSOR_FIELD)]
+                newer = [r for r in has_datable if r[CURSOR_FIELD] > since]
+                if has_datable and not newer:
                     raise RuntimeError(
                         f"FHIR server appears to have ignored the '_lastUpdated=gt{since}' filter — "
-                        f"all {len(records)} returned records for '{table_name}' have "
+                        f"all {len(has_datable)} records with a lastUpdated for '{table_name}' have "
                         f"lastUpdated <= '{since}'. "
                         f"This server may not support the _lastUpdated search parameter. "
                         f"See README.md for server requirements."

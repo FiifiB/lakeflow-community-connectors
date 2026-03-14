@@ -13,7 +13,7 @@ from pyspark.sql.types import StructType
 
 from databricks.labs.community_connector.interface import LakeflowConnect
 from databricks.labs.community_connector.sources.fhir.fhir_constants import (
-    CURSOR_FIELD, DEFAULT_MAX_RECORDS, DEFAULT_PAGE_SIZE, DEFAULT_RESOURCES,
+    CURSOR_FIELD, DEFAULT_MAX_RECORDS, DEFAULT_PAGE_SIZE, DEFAULT_RESOURCES, PAGE_DELAY,
 )
 from databricks.labs.community_connector.sources.fhir.fhir_schemas import get_schema
 from databricks.labs.community_connector.sources.fhir.fhir_utils import (
@@ -86,28 +86,30 @@ class FhirLakeflowConnect(LakeflowConnect):
 
         page_size = int(table_options.get("page_size", str(DEFAULT_PAGE_SIZE)))
         max_records = int(table_options.get("max_records_per_batch", str(DEFAULT_MAX_RECORDS)))
+        page_delay = float(table_options.get("page_delay", str(PAGE_DELAY)))
 
         params: dict[str, str] = {"_count": str(page_size)}
         if since:
             params["_lastUpdated"] = f"gt{since}"
 
         records = []
-        for resource in iter_bundle_pages(self._client, table_name, params, max_records=max_records):
+        for resource in iter_bundle_pages(self._client, table_name, params, max_records=max_records, page_delay=page_delay):
             records.append(extract_record(resource, table_name))
 
         if not records:
             return iter([]), start_offset or {}
 
         # Detect if server ignored the _lastUpdated filter.
-        # If since was set but no records have lastUpdated > since, the server likely
-        # doesn't support _lastUpdated filtering. Raise to surface this early.
+        # Only raise if there are records with a datable lastUpdated AND none of them are
+        # newer than since — that combination is evidence the filter was ignored.
+        # Records with null lastUpdated are excluded from this check (cardinality 0..1 in spec).
         if since:
-            # Exclude records missing lastUpdated — they can't be used to verify filtering.
-            newer = [r for r in records if r.get(CURSOR_FIELD) and r[CURSOR_FIELD] > since]
-            if not newer:
+            has_datable = [r for r in records if r.get(CURSOR_FIELD)]
+            newer = [r for r in has_datable if r[CURSOR_FIELD] > since]
+            if has_datable and not newer:
                 raise RuntimeError(
                     f"FHIR server appears to have ignored the '_lastUpdated=gt{since}' filter — "
-                    f"all {len(records)} returned records for '{table_name}' have "
+                    f"all {len(has_datable)} records with a lastUpdated for '{table_name}' have "
                     f"lastUpdated <= '{since}'. "
                     f"This server may not support the _lastUpdated search parameter. "
                     f"See README.md for server requirements."

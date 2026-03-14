@@ -159,7 +159,7 @@ Links are opaque — follow as-is, never parse or modify.
 - If absent: yield record but don't advance cursor from it
 
 ### Error handling
-- `429`, `500`, `503`: retry with exponential backoff (max 3 retries, initial 1s)
+- `429`, `500`, `502`, `503`: retry with exponential backoff (max 5 retries, initial 5s; 5→10→20→40→80s)
 - `429`: honor `Retry-After` header if present
 - `400`, `401`, `403`, `404`: raise immediately with descriptive message
 - All HTTP calls must have `timeout=60` (prevents hangs on slow servers)

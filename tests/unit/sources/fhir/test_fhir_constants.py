@@ -16,7 +16,7 @@ def test_cursor_field():
     assert CURSOR_FIELD == "lastUpdated"
 
 def test_retriable_status_codes():
-    assert {429, 500, 503} == RETRIABLE_STATUS_CODES
+    assert {429, 500, 502, 503} == RETRIABLE_STATUS_CODES
 
 def test_retry_config():
     assert MAX_RETRIES >= 3
