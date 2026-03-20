@@ -852,6 +852,7 @@ def register_lakeflow_source(spark):
 
 
     def extract_dosage(obj: dict) -> dict:
+        """Extract a FHIR Dosage backbone element into a flat dict."""
         timing = obj.get("timing") or {}
         timing_codings = _safe(timing, "code", "coding") or []
         timing_code = (timing_codings[0] or {}).get("code") if timing_codings else None
@@ -1904,7 +1905,7 @@ def register_lakeflow_source(spark):
     _SUPPORTED_ALGORITHMS = {"RS384", "ES384"}
 
 
-    class SmartAuthClient:  # pylint: disable=too-few-public-methods
+    class SmartAuthClient:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
         """Fetches and caches a SMART on FHIR Bearer token.
 
         auth_type values:
@@ -2506,6 +2507,9 @@ def register_lakeflow_source(spark):
                     f"Resource type '{table_name}' is not configured. "
                     f"Configured: {self._resources}"
                 )
+
+
+    _base_patient = _patient
 
 
     ########################################################
