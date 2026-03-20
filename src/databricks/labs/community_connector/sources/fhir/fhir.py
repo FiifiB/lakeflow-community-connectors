@@ -15,15 +15,15 @@ from databricks.labs.community_connector.interface import LakeflowConnect
 from databricks.labs.community_connector.sources.fhir.fhir_constants import (
     CURSOR_FIELD, DEFAULT_MAX_RECORDS, DEFAULT_PAGE_SIZE, DEFAULT_RESOURCES, PAGE_DELAY,
 )
+from databricks.labs.community_connector.sources.fhir.fhir_schemas import get_schema
+from databricks.labs.community_connector.sources.fhir.fhir_utils import (
+    FhirHttpClient, SmartAuthClient, discover_token_url, extract_record, iter_bundle_pages,
+)
 
 
 def _parse_ts(ts: str) -> datetime:
     """Parse a FHIR instant (ISO 8601 with timezone) to a datetime."""
     return datetime.fromisoformat(ts)
-from databricks.labs.community_connector.sources.fhir.fhir_schemas import get_schema
-from databricks.labs.community_connector.sources.fhir.fhir_utils import (
-    FhirHttpClient, SmartAuthClient, discover_token_url, extract_record, iter_bundle_pages,
-)
 
 
 class FhirLakeflowConnect(LakeflowConnect):

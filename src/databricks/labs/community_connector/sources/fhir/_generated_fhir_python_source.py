@@ -2171,6 +2171,11 @@ def register_lakeflow_source(spark):
     # src/databricks/labs/community_connector/sources/fhir/fhir.py
     ########################################################
 
+    def _parse_ts(ts: str) -> datetime:
+        """Parse a FHIR instant (ISO 8601 with timezone) to a datetime."""
+        return datetime.fromisoformat(ts)
+
+
     class FhirLakeflowConnect(LakeflowConnect):
         """LakeflowConnect implementation for FHIR R4 servers."""
 
@@ -2232,7 +2237,7 @@ def register_lakeflow_source(spark):
             self._validate_table(table_name)
 
             since = start_offset.get("cursor") if start_offset else None
-            if since and since >= self._init_ts:
+            if since and _parse_ts(since) >= _parse_ts(self._init_ts):
                 return iter([]), start_offset
 
             page_size = int(table_options.get("page_size", str(DEFAULT_PAGE_SIZE)))
@@ -2240,7 +2245,7 @@ def register_lakeflow_source(spark):
             page_delay = float(table_options.get("page_delay", str(PAGE_DELAY)))
             profile = table_options.get("profile", "uk_core")
 
-            params: dict[str, str] = {"_count": str(page_size)}
+            params: dict[str, str] = {"_count": str(page_size), "_sort": "_lastUpdated"}
             if since:
                 params["_lastUpdated"] = f"gt{since}"
 
@@ -2257,7 +2262,8 @@ def register_lakeflow_source(spark):
             # Records with null lastUpdated are excluded from this check (cardinality 0..1 in spec).
             if since:
                 has_datable = [r for r in records if r.get(CURSOR_FIELD)]
-                newer = [r for r in has_datable if r[CURSOR_FIELD] > since]
+                since_dt = _parse_ts(since)
+                newer = [r for r in has_datable if _parse_ts(r[CURSOR_FIELD]) > since_dt]
                 if has_datable and not newer:
                     raise RuntimeError(
                         f"FHIR server appears to have ignored the '_lastUpdated=gt{since}' filter — "
@@ -2268,12 +2274,11 @@ def register_lakeflow_source(spark):
                     )
 
             # Advance cursor to max lastUpdated across batch.
-            # ISO8601 string comparison is correct for FHIR instants (always timezone-qualified).
             cursors = [r[CURSOR_FIELD] for r in records if r.get(CURSOR_FIELD)]
             if not cursors:
                 return iter(records), start_offset or {}
 
-            last_cursor = max(cursors)
+            last_cursor = max(cursors, key=_parse_ts)
             end_offset = {"cursor": last_cursor}
 
             if start_offset and start_offset == end_offset:
