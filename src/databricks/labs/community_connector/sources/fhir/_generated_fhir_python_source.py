@@ -50,7 +50,7 @@ from pyspark.sql.types import (
 )
 from urllib.parse import urljoin
 import base64
-import jwt
+import jwt  # pylint: disable=import-error
 import requests
 import uuid
 
@@ -536,7 +536,7 @@ def register_lakeflow_source(spark):
 
     CURSOR_FIELD = "lastUpdated"
 
-    RETRIABLE_STATUS_CODES = {429, 500, 502, 503}  # 502 common on Azure Health Data Services and AWS HealthLake
+    RETRIABLE_STATUS_CODES = {429, 500, 502, 503}  # 502: Azure/AWS
     MAX_RETRIES = 5
     INITIAL_BACKOFF = 5.0  # seconds; doubled after each retry (5→10→20→40→80)
     PAGE_DELAY = 0.0       # seconds to sleep between paginated requests; set to 1.0 for public servers
@@ -762,12 +762,14 @@ def register_lakeflow_source(spark):
 
 
     def extract_coding(obj: dict | None) -> dict | None:
+        """Extract a FHIR Coding datatype."""
         if not obj:
             return None
         return {"system": obj.get("system"), "code": obj.get("code"), "display": obj.get("display")}
 
 
     def extract_codeable_concept(obj: dict | None) -> dict | None:
+        """Extract a FHIR CodeableConcept datatype."""
         if not obj:
             return None
         return {
@@ -777,24 +779,28 @@ def register_lakeflow_source(spark):
 
 
     def extract_reference(obj: dict | None) -> dict | None:
+        """Extract a FHIR Reference datatype."""
         if not obj:
             return None
         return {"reference": obj.get("reference"), "display": obj.get("display")}
 
 
     def extract_period(obj: dict | None) -> dict | None:
+        """Extract a FHIR Period datatype."""
         if not obj:
             return None
         return {"start": obj.get("start"), "end": obj.get("end")}
 
 
     def extract_identifier(obj: dict | None) -> dict | None:
+        """Extract a FHIR Identifier datatype."""
         if not obj:
             return None
         return {"system": obj.get("system"), "value": obj.get("value"), "use": obj.get("use")}
 
 
     def extract_human_name(obj: dict | None) -> dict | None:
+        """Extract a FHIR HumanName datatype."""
         if not obj:
             return None
         return {
@@ -806,6 +812,7 @@ def register_lakeflow_source(spark):
 
 
     def extract_address(obj: dict | None) -> dict | None:
+        """Extract a FHIR Address datatype."""
         if not obj:
             return None
         return {
@@ -819,12 +826,14 @@ def register_lakeflow_source(spark):
 
 
     def extract_contact_point(obj: dict | None) -> dict | None:
+        """Extract a FHIR ContactPoint datatype."""
         if not obj:
             return None
         return {"system": obj.get("system"), "value": obj.get("value"), "use": obj.get("use")}
 
 
     def extract_quantity(obj: dict | None) -> dict | None:
+        """Extract a FHIR Quantity datatype."""
         if not obj:
             return None
         return {
@@ -836,6 +845,7 @@ def register_lakeflow_source(spark):
 
 
     def extract_annotation(obj: dict | None) -> dict | None:
+        """Extract a FHIR Annotation datatype."""
         if not obj:
             return None
         return {"text": obj.get("text"), "time": obj.get("time")}
@@ -904,7 +914,10 @@ def register_lakeflow_source(spark):
             "deceased_datetime": r.get("deceasedDateTime"),
             "address": [extract_address(a) for a in (r.get("address") or [])],
             "maritalStatus": extract_codeable_concept(r.get("maritalStatus")),
-            "generalPractitioner": [extract_reference(gp) for gp in (r.get("generalPractitioner") or [])],
+            "generalPractitioner": [
+                extract_reference(gp)
+                for gp in (r.get("generalPractitioner") or [])
+            ],
             "managingOrganization": extract_reference(r.get("managingOrganization")),
         }
 
@@ -1371,7 +1384,10 @@ def register_lakeflow_source(spark):
             "effective_period": extract_period(r.get("effectivePeriod")),
             "issued": r.get("issued"),
             "performer": [extract_reference(p) for p in (r.get("performer") or [])],
-            "results_interpreter": [extract_reference(ri) for ri in (r.get("resultsInterpreter") or [])],
+            "results_interpreter": [
+                extract_reference(ri)
+                for ri in (r.get("resultsInterpreter") or [])
+            ],
             "specimen": [extract_reference(s) for s in (r.get("specimen") or [])],
             "result": [extract_reference(res) for res in (r.get("result") or [])],
             "conclusion": r.get("conclusion"),
@@ -1532,15 +1548,24 @@ def register_lakeflow_source(spark):
             "route": extract_codeable_concept(r.get("route")),
             "dose_quantity": extract_quantity(r.get("doseQuantity")),
             "performer": [
-                {"function": extract_codeable_concept(p.get("function")), "actor": extract_reference(p.get("actor"))}
+                {
+                    "function": extract_codeable_concept(p.get("function")),
+                    "actor": extract_reference(p.get("actor")),
+                }
                 for p in (r.get("performer") or [])
             ],
             "reason_code": [extract_codeable_concept(rc) for rc in (r.get("reasonCode") or [])],
             "reason_reference": [extract_reference(rr) for rr in (r.get("reasonReference") or [])],
             "is_subpotent": r.get("isSubpotent"),
-            "program_eligibility": [extract_codeable_concept(pe) for pe in (r.get("programEligibility") or [])],
+            "program_eligibility": [
+                extract_codeable_concept(pe)
+                for pe in (r.get("programEligibility") or [])
+            ],
             "funding_source": extract_codeable_concept(r.get("fundingSource")),
-            "protocol_applied": [_extract_protocol_applied(pa) for pa in (r.get("protocolApplied") or [])],
+            "protocol_applied": [
+                _extract_protocol_applied(pa)
+                for pa in (r.get("protocolApplied") or [])
+            ],
         }
 
 
@@ -1589,7 +1614,11 @@ def register_lakeflow_source(spark):
             "period": extract_period(r.get("period")),
             "payor": [extract_reference(p) for p in (r.get("payor") or [])],
             "class_coverage": [
-                {"type": extract_codeable_concept(c.get("type")), "value": c.get("value"), "name": c.get("name")}
+                {
+                    "type": extract_codeable_concept(c.get("type")),
+                    "value": c.get("value"),
+                    "name": c.get("name"),
+                }
                 for c in (r.get("class") or [])
             ],
             "order": r.get("order"),
@@ -1762,7 +1791,10 @@ def register_lakeflow_source(spark):
             "expiration_date": r.get("expirationDate"),
             "lot_number": r.get("lotNumber"),
             "serial_number": r.get("serialNumber"),
-            "device_name": [{"name": dn.get("name"), "type": dn.get("type")} for dn in (r.get("deviceName") or [])],
+            "device_name": [
+                {"name": dn.get("name"), "type": dn.get("type")}
+                for dn in (r.get("deviceName") or [])
+            ],
             "model_number": r.get("modelNumber"),
             "type": extract_codeable_concept(r.get("type")),
             "patient": extract_reference(r.get("patient")),
@@ -1869,7 +1901,10 @@ def register_lakeflow_source(spark):
     # src/databricks/labs/community_connector/sources/fhir/fhir_utils.py
     ########################################################
 
-    class SmartAuthClient:
+    _SUPPORTED_ALGORITHMS = {"RS384", "ES384"}
+
+
+    class SmartAuthClient:  # pylint: disable=too-few-public-methods
         """Fetches and caches a SMART on FHIR Bearer token.
 
         auth_type values:
@@ -1878,9 +1913,12 @@ def register_lakeflow_source(spark):
         - "none": No authentication (open servers, dev/test only)
         """
 
-        def __init__(self, token_url: str, client_id: str, auth_type: str,
-                     private_key_pem: str = "", client_secret: str = "", scope: str = "",
-                     kid: str = "", private_key_algorithm: str = "RS384") -> None:
+        def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+            self, token_url: str, client_id: str, auth_type: str,
+            private_key_pem: str = "", client_secret: str = "",
+            scope: str = "", kid: str = "",
+            private_key_algorithm: str = "RS384",
+        ) -> None:
             self._token_url = token_url
             self._client_id = client_id
             self._auth_type = auth_type
@@ -1893,15 +1931,15 @@ def register_lakeflow_source(spark):
             self._expires_at: Optional[datetime] = None
 
             if auth_type == "jwt_assertion":
-                _SUPPORTED_ALGORITHMS = {"RS384", "ES384"}
                 if private_key_algorithm not in _SUPPORTED_ALGORITHMS:
                     raise ValueError(
-                        f"private_key_algorithm {private_key_algorithm!r} is not supported. "
-                        f"Use one of: {sorted(_SUPPORTED_ALGORITHMS)}. "
-                        f"Per the SMART on FHIR Backend Services spec, clients SHALL support RS384 and ES384."
+                        f"private_key_algorithm {private_key_algorithm!r} "
+                        f"is not supported. "
+                        f"Use one of: {sorted(_SUPPORTED_ALGORITHMS)}."
                     )
 
         def get_token(self) -> str:
+            """Return a cached or freshly-fetched Bearer token."""
             if self._auth_type == "none":
                 return ""
             if self._access_token and self._expires_at:
@@ -1947,7 +1985,11 @@ def register_lakeflow_source(spark):
                     "registered with the FHIR server's JWK Set."
                 )
             jwt_headers = {"kid": self._kid, "typ": "JWT"}
-            assertion = jwt.encode(payload, self._private_key_pem, algorithm=self._private_key_algorithm, headers=jwt_headers)
+            assertion = jwt.encode(
+                payload, self._private_key_pem,
+                algorithm=self._private_key_algorithm,
+                headers=jwt_headers,
+            )
             data = {
                 "grant_type": "client_credentials",
                 "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
@@ -2017,13 +2059,18 @@ def register_lakeflow_source(spark):
             return h
 
         def get(self, resource_type: str, params: Optional[dict] = None) -> requests.Response:
+            """Fetch a FHIR resource type with optional query parameters."""
             url = urljoin(self._base_url, resource_type)
             return self.get_url(url, params=params)
 
         def get_url(self, url: str, params: Optional[dict] = None) -> requests.Response:
+            """Fetch a URL with retry logic and auth injection."""
             backoff = INITIAL_BACKOFF
             for attempt in range(MAX_RETRIES):
-                resp = self._session.get(url, params=params, headers=self._headers(), timeout=HTTP_TIMEOUT)
+                resp = self._session.get(
+                    url, params=params,
+                    headers=self._headers(), timeout=HTTP_TIMEOUT,
+                )
                 if resp.status_code not in RETRIABLE_STATUS_CODES:
                     return resp
                 if attempt < MAX_RETRIES - 1:
@@ -2142,7 +2189,10 @@ def register_lakeflow_source(spark):
     # Complex nested extension (sub-extensions: deathNotificationStatus, systemEffectiveDate)
     # Top-level valueX not used directly; sub-extension deathNotificationStatus is valueCodeableConcept
     # Verified from Extension-UKCore-DeathNotificationStatus.xml
-    _EXT_DEATH_NOTIFICATION_STATUS = "https://fhir.hl7.org.uk/StructureDefinition/Extension-UKCore-DeathNotificationStatus"
+    _EXT_DEATH_NOTIFICATION_STATUS = (
+        "https://fhir.hl7.org.uk/StructureDefinition/"
+        "Extension-UKCore-DeathNotificationStatus"
+    )
 
     # valueBoolean — standard HL7 R4 extension (NOT a UK Core-specific URL).
     # UK Core Patient profile references the base HL7 extension for interpreter required.
@@ -2152,7 +2202,10 @@ def register_lakeflow_source(spark):
     _EXT_INTERPRETER_REQUIRED = "http://hl7.org/fhir/StructureDefinition/patient-interpreterRequired"
 
     # valueCodeableConcept — verified from Extension-UKCore-ResidentialStatus.xml
-    _EXT_RESIDENTIAL_STATUS = "https://fhir.hl7.org.uk/StructureDefinition/Extension-UKCore-ResidentialStatus"
+    _EXT_RESIDENTIAL_STATUS = (
+        "https://fhir.hl7.org.uk/StructureDefinition/"
+        "Extension-UKCore-ResidentialStatus"
+    )
 
     # NHS number identifier system — verified: fixedUri in UKCore-Patient.xml
     _NHS_NUMBER_SYSTEM = "https://fhir.nhs.uk/Id/nhs-number"
@@ -2230,6 +2283,7 @@ def register_lakeflow_source(spark):
     ########################################################
 
     def validate(config: dict) -> None:
+        """Validate FHIR credentials by performing a token exchange and metadata fetch."""
         auth_type = config.get("auth_type", "none")
         base_url = config.get("base_url", "").rstrip("/")
 
@@ -2299,6 +2353,7 @@ def register_lakeflow_source(spark):
 
 
     def main() -> None:
+        """CLI entry point for credential validation."""
         parser = argparse.ArgumentParser(
             description="Validate FHIR connector credentials against a real FHIR server."
         )
@@ -2406,7 +2461,10 @@ def register_lakeflow_source(spark):
                 params["_lastUpdated"] = f"gt{since}"
 
             records = []
-            for resource in iter_bundle_pages(self._client, table_name, params, max_records=max_records, page_delay=page_delay):
+            for resource in iter_bundle_pages(
+                self._client, table_name, params,
+                max_records=max_records, page_delay=page_delay,
+            ):
                 records.append(extract_record(resource, table_name, profile=profile))
 
             if not records:
