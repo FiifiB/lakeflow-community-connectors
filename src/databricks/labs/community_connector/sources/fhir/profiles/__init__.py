@@ -18,10 +18,6 @@ imports. They are imported by fhir_schemas.py to trigger registration.
 from databricks.labs.community_connector.sources.fhir.fhir_profile_registry import (
     FALLBACK_SCHEMA,
     PROFILE_CHAIN,
-    _COMMON_FIELDS,
-    _EXTRACTOR_REGISTRY,
-    _SCHEMA_REGISTRY,
-    _chain,
     extract,
     get_schema,
     register,
@@ -30,10 +26,6 @@ from databricks.labs.community_connector.sources.fhir.fhir_profile_registry impo
 __all__ = [
     "FALLBACK_SCHEMA",
     "PROFILE_CHAIN",
-    "_COMMON_FIELDS",
-    "_EXTRACTOR_REGISTRY",
-    "_SCHEMA_REGISTRY",
-    "_chain",
     "extract",
     "get_schema",
     "register",

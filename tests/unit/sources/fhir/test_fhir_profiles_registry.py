@@ -2,8 +2,11 @@
 
 from pyspark.sql.types import StringType, StructField, StructType, TimestampType
 
+from databricks.labs.community_connector.sources.fhir.fhir_profile_registry import (
+    _COMMON_FIELDS,
+)
 from databricks.labs.community_connector.sources.fhir.profiles import (
-    FALLBACK_SCHEMA, PROFILE_CHAIN, _COMMON_FIELDS,
+    FALLBACK_SCHEMA, PROFILE_CHAIN,
     extract, get_schema, register,
 )
 
