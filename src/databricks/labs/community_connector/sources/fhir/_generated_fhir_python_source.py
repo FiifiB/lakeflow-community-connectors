@@ -48,9 +48,10 @@ from pyspark.sql.types import (
     VariantType,
     VariantVal,
 )
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 import base64
 import jwt  # pylint: disable=import-error
+import logging
 import requests
 import uuid
 
@@ -546,6 +547,13 @@ def register_lakeflow_source(spark):
     DEFAULT_PAGE_SIZE = 100   # _count parameter sent to FHIR server
     DEFAULT_MAX_RECORDS = 1000  # max records per read_table() call
 
+    # Bulk export constants (HL7 Bulk Data Access IG)
+    BULK_POLL_INTERVAL = 30        # seconds between status poll requests
+    BULK_EXPORT_TIMEOUT = 14400    # seconds (4 hours) max wait for export completion
+    BULK_NDJSON_TIMEOUT = 300      # seconds; NDJSON file download timeout (files can be GBs)
+    BULK_VALID_SCOPES = {"system", "patient", "group"}
+    BULK_VALID_INCREMENTAL_MODES = {"since", "typefilter", "full"}
+
 
     ########################################################
     # src/databricks/labs/community_connector/sources/fhir/fhir_profile_registry.py
@@ -562,8 +570,8 @@ def register_lakeflow_source(spark):
         StructField("id", StringType(), nullable=True),
         StructField("resourceType", StringType(), nullable=True),
         StructField("lastUpdated", TimestampType(), nullable=True),
-        StructField("raw_json", StringType(), nullable=True),
-        StructField("extension", StringType(), nullable=True),
+        StructField("raw_json", VariantType(), nullable=True),
+        StructField("extension", VariantType(), nullable=True),
     ]
 
     FALLBACK_SCHEMA = StructType(_COMMON_FIELDS)
@@ -590,10 +598,12 @@ def register_lakeflow_source(spark):
             def _patient(r: dict) -> dict:
                 return {...}
         """
+
         def decorator(fn: Callable) -> Callable:
             _SCHEMA_REGISTRY[(resource_type, profile)] = schema
             _EXTRACTOR_REGISTRY[(resource_type, profile)] = fn
             return fn
+
         return decorator
 
 
@@ -1915,9 +1925,14 @@ def register_lakeflow_source(spark):
         """
 
         def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-            self, token_url: str, client_id: str, auth_type: str,
-            private_key_pem: str = "", client_secret: str = "",
-            scope: str = "", kid: str = "",
+            self,
+            token_url: str,
+            client_id: str,
+            auth_type: str,
+            private_key_pem: str = "",
+            client_secret: str = "",
+            scope: str = "",
+            kid: str = "",
             private_key_algorithm: str = "RS384",
         ) -> None:
             self._token_url = token_url
@@ -1957,10 +1972,13 @@ def register_lakeflow_source(spark):
                 data = self._client_secret_data()
                 post_kwargs = {"auth": (self._client_id, self._client_secret)}
             else:
-                raise ValueError(f"Unsupported auth_type: {self._auth_type!r}. "
-                                 f"Use 'jwt_assertion', 'client_secret', or 'none'.")
+                raise ValueError(
+                    f"Unsupported auth_type: {self._auth_type!r}. "
+                    f"Use 'jwt_assertion', 'client_secret', or 'none'."
+                )
             resp = requests.post(
-                self._token_url, data=data,
+                self._token_url,
+                data=data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=TOKEN_TIMEOUT,
                 **post_kwargs,
@@ -1975,8 +1993,12 @@ def register_lakeflow_source(spark):
         def _jwt_assertion_data(self) -> dict:
             now = datetime.now(timezone.utc)
             payload = {
-                "iss": self._client_id, "sub": self._client_id, "aud": self._token_url,
-                "jti": str(uuid.uuid4()), "iat": now, "nbf": now,
+                "iss": self._client_id,
+                "sub": self._client_id,
+                "aud": self._token_url,
+                "jti": str(uuid.uuid4()),
+                "iat": now,
+                "nbf": now,
                 "exp": now + timedelta(minutes=5),
             }
             if not self._kid:
@@ -1987,7 +2009,8 @@ def register_lakeflow_source(spark):
                 )
             jwt_headers = {"kid": self._kid, "typ": "JWT"}
             assertion = jwt.encode(
-                payload, self._private_key_pem,
+                payload,
+                self._private_key_pem,
                 algorithm=self._private_key_algorithm,
                 headers=jwt_headers,
             )
@@ -2069,8 +2092,10 @@ def register_lakeflow_source(spark):
             backoff = INITIAL_BACKOFF
             for attempt in range(MAX_RETRIES):
                 resp = self._session.get(
-                    url, params=params,
-                    headers=self._headers(), timeout=HTTP_TIMEOUT,
+                    url,
+                    params=params,
+                    headers=self._headers(),
+                    timeout=HTTP_TIMEOUT,
                 )
                 if resp.status_code not in RETRIABLE_STATUS_CODES:
                     return resp
@@ -2160,13 +2185,311 @@ def register_lakeflow_source(spark):
             "id": resource.get("id"),
             "resourceType": resource.get("resourceType", resource_type),
             "lastUpdated": meta.get("lastUpdated"),
-            # raw_json and extension are stored as StringType (JSON strings).
-            # Downstream queries on DBR 15.3+ can use parse_json() to get VARIANT.
+            # raw_json and extension are VariantType — return JSON strings here;
+            # the framework's parse_value() converts them via VariantVal.parseJson().
             "raw_json": json.dumps(resource),
-            "extension": json.dumps(resource.get("extension")),
+            "extension": json.dumps(resource["extension"]) if "extension" in resource else None,
         }
         record.update(extract(resource, resource_type, profile))
         return record
+
+
+    ########################################################
+    # src/databricks/labs/community_connector/sources/fhir/fhir_bulk.py
+    ########################################################
+
+    logger = logging.getLogger(__name__)
+
+
+    class BulkExportClient:
+        """Client for the FHIR Bulk Data Access IG async export workflow."""
+
+        def __init__(
+            self,
+            base_url: str,
+            auth_client: SmartAuthClient,
+            scope: str = "system",
+            group_id: Optional[str] = None,
+            poll_interval: int = BULK_POLL_INTERVAL,
+            timeout: int = BULK_EXPORT_TIMEOUT,
+        ) -> None:
+            if scope not in BULK_VALID_SCOPES:
+                raise ValueError(
+                    f"Invalid bulk_export_scope {scope!r}. Use one of: {sorted(BULK_VALID_SCOPES)}."
+                )
+            if scope == "group" and not group_id:
+                raise ValueError("bulk_export_group_id is required when bulk_export_scope is 'group'.")
+            self._base_url = base_url.rstrip("/")
+            self._auth_client = auth_client
+            self._scope = scope
+            self._group_id = group_id
+            self._poll_interval = poll_interval
+            self._timeout = timeout
+            self._session = requests.Session()
+
+        def _export_url(self) -> str:
+            if self._scope == "patient":
+                return f"{self._base_url}/Patient/$export"
+            if self._scope == "group":
+                safe_id = quote(self._group_id, safe="")
+                return f"{self._base_url}/Group/{safe_id}/$export"
+            return f"{self._base_url}/$export"
+
+        def _auth_headers(self) -> dict:
+            token = self._auth_client.get_token()
+            h = {"Accept": "application/fhir+json"}
+            if token:
+                h["Authorization"] = f"Bearer {token}"
+            return h
+
+        def _ndjson_auth_headers(self) -> dict:
+            token = self._auth_client.get_token()
+            h = {"Accept": "application/fhir+ndjson"}
+            if token:
+                h["Authorization"] = f"Bearer {token}"
+            return h
+
+        def export(
+            self,
+            resource_types: list,
+            since: Optional[str] = None,
+            incremental_mode: str = "since",
+        ) -> tuple:
+            """Run a full bulk export cycle: kick-off -> poll -> download -> cleanup.
+
+            Returns (transaction_time, {resource_type: [resource_dicts]}).
+            transaction_time is an ISO-8601 string suitable for use as a CDC cursor.
+            For incremental_mode="full", transaction_time is None (caller should not
+            advance the cursor).
+            """
+            if incremental_mode not in BULK_VALID_INCREMENTAL_MODES:
+                raise ValueError(
+                    f"Invalid bulk_incremental_mode {incremental_mode!r}. "
+                    f"Use one of: {sorted(BULK_VALID_INCREMENTAL_MODES)}."
+                )
+
+            status_url = self._kick_off(resource_types, since, incremental_mode)
+            try:
+                manifest = self._poll_until_complete(status_url)
+                resources = self._download_and_parse(manifest)
+                if incremental_mode == "full":
+                    # Full mode re-exports all data every run — don't advance cursor.
+                    return None, resources
+                transaction_time = manifest.get("transactionTime")
+                if not transaction_time:
+                    logger.warning(
+                        "Bulk export manifest missing transactionTime. "
+                        "Falling back to current UTC time as cursor — this may "
+                        "cause duplicate records on the next incremental run."
+                    )
+                    transaction_time = datetime.now(timezone.utc).isoformat()
+                return transaction_time, resources
+            finally:
+                self._cleanup(status_url)
+
+        def _kick_off(
+            self,
+            resource_types: list,
+            since: Optional[str],
+            incremental_mode: str,
+        ) -> str:
+            """Issue the async $export request. Returns the status polling URL."""
+            url = self._export_url()
+            params = {}
+
+            if incremental_mode == "typefilter" and since and resource_types:
+                # Per HL7 spec, _typeFilter encodes the resource type in each filter
+                # string, so _type is redundant and some servers reject the combination.
+                filters = [f"{rt}?_lastUpdated=gt{since}" for rt in resource_types]
+                params["_typeFilter"] = ",".join(filters)
+            else:
+                if resource_types:
+                    params["_type"] = ",".join(resource_types)
+                if since and incremental_mode == "since":
+                    params["_since"] = since
+
+            headers = self._auth_headers()
+            headers["Prefer"] = "respond-async"
+
+            backoff = INITIAL_BACKOFF
+            for attempt in range(MAX_RETRIES):
+                resp = self._session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT,
+                )
+                if resp.status_code == 202:
+                    status_url = resp.headers.get("Content-Location")
+                    if not status_url:
+                        raise RuntimeError(
+                            "Bulk export kick-off returned 202 but no Content-Location header. "
+                            f"Response headers: {dict(resp.headers)}"
+                        )
+                    logger.info("Bulk export started. Status URL: %s", status_url)
+                    return status_url
+                if resp.status_code not in RETRIABLE_STATUS_CODES:
+                    raise RuntimeError(
+                        f"Bulk export kick-off failed (HTTP {resp.status_code}): {resp.text[:500]}"
+                    )
+                if attempt < MAX_RETRIES - 1:
+                    sleep_seconds = _retry_after(resp, backoff)
+                    logger.warning(
+                        "Bulk export kick-off got %d, retrying in %.0fs (attempt %d/%d)",
+                        resp.status_code,
+                        sleep_seconds,
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
+                    time.sleep(sleep_seconds)
+                    backoff *= 2
+
+            raise RuntimeError(
+                f"Bulk export kick-off failed after {MAX_RETRIES} retries "
+                f"(last HTTP {resp.status_code}): {resp.text[:500]}"
+            )
+
+        def _poll_until_complete(self, status_url: str) -> dict:
+            """Poll the status URL until the export completes or times out.
+
+            Retries on transient errors (429, 500, 502, 503) with backoff.
+            """
+            deadline = time.time() + self._timeout
+            transient_backoff = INITIAL_BACKOFF
+            while time.time() < deadline:
+                resp = self._session.get(
+                    status_url,
+                    headers=self._auth_headers(),
+                    timeout=HTTP_TIMEOUT,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+
+                if resp.status_code == 202:
+                    progress = resp.headers.get("X-Progress", "")
+                    if progress:
+                        logger.info("Bulk export progress: %s", progress)
+                    sleep_seconds = _retry_after(resp, self._poll_interval)
+                    transient_backoff = INITIAL_BACKOFF  # reset on successful poll
+                    time.sleep(sleep_seconds)
+                    continue
+
+                if resp.status_code in RETRIABLE_STATUS_CODES:
+                    sleep_seconds = _retry_after(resp, transient_backoff)
+                    logger.warning(
+                        "Bulk export poll got %d, retrying in %.0fs",
+                        resp.status_code,
+                        sleep_seconds,
+                    )
+                    time.sleep(sleep_seconds)
+                    transient_backoff = min(transient_backoff * 2, 120)
+                    continue
+
+                raise RuntimeError(
+                    f"Bulk export status check failed (HTTP {resp.status_code}): {resp.text[:500]}"
+                )
+
+            raise RuntimeError(
+                f"Bulk export timed out after {self._timeout}s. Status URL: {status_url}"
+            )
+
+        def _download_and_parse(self, manifest: dict) -> dict:
+            """Download NDJSON files from the manifest and group records by type."""
+            requires_token = manifest.get("requiresAccessToken", True)
+            resources: dict = {}
+
+            for entry in manifest.get("output", []):
+                rtype = entry.get("type", "Unknown")
+                url = entry.get("url")
+                if not url:
+                    continue
+                records = list(self._download_ndjson(url, requires_token))
+                resources.setdefault(rtype, []).extend(records)
+                logger.info(
+                    "Downloaded %d %s resources from %s",
+                    len(records),
+                    rtype,
+                    url,
+                )
+
+            for entry in manifest.get("error", []):
+                url = entry.get("url")
+                if url:
+                    try:
+                        errors = list(self._download_ndjson(url, requires_token))
+                        for err in errors:
+                            logger.warning("Bulk export OperationOutcome: %s", json.dumps(err)[:300])
+                    except Exception as exc:
+                        logger.warning("Failed to download error file %s: %s", url, exc)
+
+            return resources
+
+        def _download_ndjson(self, url: str, requires_access_token: bool = True):
+            """Download and parse an NDJSON file, yielding one dict per line.
+
+            Handles three download patterns:
+            1. Direct HTTP + bearer token (Epic, HAPI, InterSystems, etc.)
+            2. No auth / presigned URL (IBM, SMART test server)
+            3. 307 redirect to presigned S3 (Cerner) — strips auth on redirect
+            """
+            headers = (
+                self._ndjson_auth_headers()
+                if requires_access_token
+                else {"Accept": "application/fhir+ndjson"}
+            )
+            resp = self._session.get(
+                url,
+                headers=headers,
+                stream=True,
+                allow_redirects=False,
+                timeout=BULK_NDJSON_TIMEOUT,
+            )
+
+            if resp.status_code in (301, 302, 303, 307, 308):
+                redirect_url = resp.headers.get("Location")
+                if not redirect_url:
+                    resp.close()
+                    raise RuntimeError(f"NDJSON download got {resp.status_code} but no Location header")
+                resp.close()
+                resp = self._session.get(
+                    redirect_url,
+                    headers={"Accept": "application/fhir+ndjson"},
+                    stream=True,
+                    timeout=BULK_NDJSON_TIMEOUT,
+                )
+
+            try:
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"NDJSON download failed (HTTP {resp.status_code}): {resp.text[:500]}"
+                    )
+                for line in resp.iter_lines(decode_unicode=True):
+                    if line:
+                        yield json.loads(line)
+            finally:
+                resp.close()
+
+        def _cleanup(self, status_url: str) -> None:
+            """Best-effort DELETE of the export job. Never raises."""
+            try:
+                self._session.delete(
+                    status_url,
+                    headers=self._auth_headers(),
+                    timeout=HTTP_TIMEOUT,
+                )
+            except Exception as exc:
+                logger.warning("Bulk export cleanup failed for %s: %s", status_url, exc)
+
+
+    def _retry_after(resp: requests.Response, default: float) -> float:
+        """Extract Retry-After header value in seconds, or return default."""
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return default
 
 
     ########################################################
@@ -2422,6 +2745,19 @@ def register_lakeflow_source(spark):
                 else list(DEFAULT_RESOURCES)
             )
 
+            # Bulk export (opt-in via bulk_export_enabled=true)
+            self._bulk_enabled = options.get("bulk_export_enabled", "false").lower() == "true"
+            if self._bulk_enabled:
+                self._bulk_incremental_mode = options.get("bulk_incremental_mode", "since")
+                self._bulk_client = BulkExportClient(
+                    base_url=options["base_url"],
+                    auth_client=auth_client,
+                    scope=options.get("bulk_export_scope", "system"),
+                    group_id=options.get("bulk_export_group_id") or None,
+                    poll_interval=int(options.get("bulk_export_poll_interval", "30")),
+                    timeout=int(options.get("bulk_export_timeout", "14400")),
+                )
+
         def list_tables(self) -> list[str]:
             return list(self._resources)
 
@@ -2445,8 +2781,12 @@ def register_lakeflow_source(spark):
 
             Uses max_records_per_batch admission control (always required for CDC tables).
             Short-circuits when cursor >= _init_ts to prevent chasing live writes.
+            When bulk_export_enabled=true, delegates to _read_table_bulk() instead.
             """
             self._validate_table(table_name)
+
+            if self._bulk_enabled:
+                return self._read_table_bulk(table_name, start_offset, table_options)
 
             since = start_offset.get("cursor") if start_offset else None
             if since and _parse_ts(since) >= _parse_ts(self._init_ts):
@@ -2463,8 +2803,11 @@ def register_lakeflow_source(spark):
 
             records = []
             for resource in iter_bundle_pages(
-                self._client, table_name, params,
-                max_records=max_records, page_delay=page_delay,
+                self._client,
+                table_name,
+                params,
+                max_records=max_records,
+                page_delay=page_delay,
             ):
                 records.append(extract_record(resource, table_name, profile=profile))
 
@@ -2501,11 +2844,50 @@ def register_lakeflow_source(spark):
 
             return iter(records), end_offset
 
+        def _read_table_bulk(
+            self,
+            table_name: str,
+            start_offset: dict,
+            table_options: dict[str, str],
+        ) -> tuple[Iterator[dict], dict]:
+            """Bulk export path. Uses server transactionTime as the CDC cursor.
+
+            For incremental_mode="full", the cursor is not advanced — every run
+            re-exports all data.
+            """
+            since = start_offset.get("cursor") if start_offset else None
+            if since and _parse_ts(since) >= _parse_ts(self._init_ts):
+                return iter([]), start_offset
+
+            profile = table_options.get("profile", "uk_core")
+            transaction_time, resource_map = self._bulk_client.export(
+                resource_types=[table_name],
+                since=since,
+                incremental_mode=self._bulk_incremental_mode,
+            )
+
+            raw_resources = resource_map.get(table_name, [])
+            if not raw_resources:
+                return iter([]), start_offset or {}
+
+            records = [extract_record(r, table_name, profile=profile) for r in raw_resources]
+
+            # In "full" mode, transaction_time is None — don't advance the cursor
+            # so the next run re-exports everything.
+            if transaction_time is None:
+                return iter(records), start_offset or {}
+
+            end_offset = {"cursor": transaction_time}
+
+            if start_offset and start_offset == end_offset:
+                return iter([]), start_offset
+
+            return iter(records), end_offset
+
         def _validate_table(self, table_name: str) -> None:
             if table_name not in self._resources:
                 raise ValueError(
-                    f"Resource type '{table_name}' is not configured. "
-                    f"Configured: {self._resources}"
+                    f"Resource type '{table_name}' is not configured. Configured: {self._resources}"
                 )
 
 

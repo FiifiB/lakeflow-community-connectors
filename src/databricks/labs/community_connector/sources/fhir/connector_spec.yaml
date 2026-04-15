@@ -143,6 +143,55 @@ connection:
         Authentication method to use. Must be one of: "jwt_assertion", "client_secret", or "none".
         Select the auth_type that matches your FHIR server's capabilities.
 
+    # ── Bulk Data Export options (opt-in) ──────────────────────────────────────
+    - name: bulk_export_enabled
+      type: string
+      required: false
+      description: >
+        Enable FHIR Bulk Data Access export mode (HL7 Bulk Data Access IG).
+        When "true", the connector uses the async $export workflow instead of
+        per-resource bundle pagination. Default: "false".
+
+    - name: bulk_export_scope
+      type: string
+      required: false
+      description: >
+        Export scope for bulk requests. "system": all resources server-wide.
+        "patient": Patient compartment export. "group": Group-specific export
+        (requires bulk_export_group_id). Default: "system".
+
+    - name: bulk_export_group_id
+      type: string
+      required: false
+      description: >
+        FHIR Group resource ID for group-scoped bulk export. Required when
+        bulk_export_scope is "group". Ignored otherwise. This ID is provided
+        by the healthcare organization's administrators.
+
+    - name: bulk_export_poll_interval
+      type: string
+      required: false
+      description: >
+        Seconds between status poll requests while waiting for bulk export
+        to complete. The server's Retry-After header takes precedence when
+        present. Default: "30".
+
+    - name: bulk_export_timeout
+      type: string
+      required: false
+      description: >
+        Maximum seconds to wait for a bulk export job to complete before
+        raising an error. Default: "14400" (4 hours).
+
+    - name: bulk_incremental_mode
+      type: string
+      required: false
+      description: >
+        How to apply the CDC cursor in bulk export mode. "since": standard
+        _since parameter (most servers). "typefilter": _typeFilter with date
+        ranges (Epic workaround — Epic does not support _since). "full": no
+        incremental filtering (re-exports all data every run). Default: "since".
+
 # ============================================================================
 # External Options Allowlist
 # These table-specific options must be included in the externalOptionsAllowList

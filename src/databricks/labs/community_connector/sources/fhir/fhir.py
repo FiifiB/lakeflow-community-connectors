@@ -13,11 +13,20 @@ from pyspark.sql.types import StructType
 
 from databricks.labs.community_connector.interface import LakeflowConnect
 from databricks.labs.community_connector.sources.fhir.fhir_constants import (
-    CURSOR_FIELD, DEFAULT_MAX_RECORDS, DEFAULT_PAGE_SIZE, DEFAULT_RESOURCES, PAGE_DELAY,
+    CURSOR_FIELD,
+    DEFAULT_MAX_RECORDS,
+    DEFAULT_PAGE_SIZE,
+    DEFAULT_RESOURCES,
+    PAGE_DELAY,
 )
 from databricks.labs.community_connector.sources.fhir.fhir_schemas import get_schema
+from databricks.labs.community_connector.sources.fhir.fhir_bulk import BulkExportClient
 from databricks.labs.community_connector.sources.fhir.fhir_utils import (
-    FhirHttpClient, SmartAuthClient, discover_token_url, extract_record, iter_bundle_pages,
+    FhirHttpClient,
+    SmartAuthClient,
+    discover_token_url,
+    extract_record,
+    iter_bundle_pages,
 )
 
 
@@ -60,6 +69,19 @@ class FhirLakeflowConnect(LakeflowConnect):
             else list(DEFAULT_RESOURCES)
         )
 
+        # Bulk export (opt-in via bulk_export_enabled=true)
+        self._bulk_enabled = options.get("bulk_export_enabled", "false").lower() == "true"
+        if self._bulk_enabled:
+            self._bulk_incremental_mode = options.get("bulk_incremental_mode", "since")
+            self._bulk_client = BulkExportClient(
+                base_url=options["base_url"],
+                auth_client=auth_client,
+                scope=options.get("bulk_export_scope", "system"),
+                group_id=options.get("bulk_export_group_id") or None,
+                poll_interval=int(options.get("bulk_export_poll_interval", "30")),
+                timeout=int(options.get("bulk_export_timeout", "14400")),
+            )
+
     def list_tables(self) -> list[str]:
         return list(self._resources)
 
@@ -83,8 +105,12 @@ class FhirLakeflowConnect(LakeflowConnect):
 
         Uses max_records_per_batch admission control (always required for CDC tables).
         Short-circuits when cursor >= _init_ts to prevent chasing live writes.
+        When bulk_export_enabled=true, delegates to _read_table_bulk() instead.
         """
         self._validate_table(table_name)
+
+        if self._bulk_enabled:
+            return self._read_table_bulk(table_name, start_offset, table_options)
 
         since = start_offset.get("cursor") if start_offset else None
         if since and _parse_ts(since) >= _parse_ts(self._init_ts):
@@ -101,8 +127,11 @@ class FhirLakeflowConnect(LakeflowConnect):
 
         records = []
         for resource in iter_bundle_pages(
-            self._client, table_name, params,
-            max_records=max_records, page_delay=page_delay,
+            self._client,
+            table_name,
+            params,
+            max_records=max_records,
+            page_delay=page_delay,
         ):
             records.append(extract_record(resource, table_name, profile=profile))
 
@@ -139,9 +168,48 @@ class FhirLakeflowConnect(LakeflowConnect):
 
         return iter(records), end_offset
 
+    def _read_table_bulk(
+        self,
+        table_name: str,
+        start_offset: dict,
+        table_options: dict[str, str],
+    ) -> tuple[Iterator[dict], dict]:
+        """Bulk export path. Uses server transactionTime as the CDC cursor.
+
+        For incremental_mode="full", the cursor is not advanced — every run
+        re-exports all data.
+        """
+        since = start_offset.get("cursor") if start_offset else None
+        if since and _parse_ts(since) >= _parse_ts(self._init_ts):
+            return iter([]), start_offset
+
+        profile = table_options.get("profile", "uk_core")
+        transaction_time, resource_map = self._bulk_client.export(
+            resource_types=[table_name],
+            since=since,
+            incremental_mode=self._bulk_incremental_mode,
+        )
+
+        raw_resources = resource_map.get(table_name, [])
+        if not raw_resources:
+            return iter([]), start_offset or {}
+
+        records = [extract_record(r, table_name, profile=profile) for r in raw_resources]
+
+        # In "full" mode, transaction_time is None — don't advance the cursor
+        # so the next run re-exports everything.
+        if transaction_time is None:
+            return iter(records), start_offset or {}
+
+        end_offset = {"cursor": transaction_time}
+
+        if start_offset and start_offset == end_offset:
+            return iter([]), start_offset
+
+        return iter(records), end_offset
+
     def _validate_table(self, table_name: str) -> None:
         if table_name not in self._resources:
             raise ValueError(
-                f"Resource type '{table_name}' is not configured. "
-                f"Configured: {self._resources}"
+                f"Resource type '{table_name}' is not configured. Configured: {self._resources}"
             )

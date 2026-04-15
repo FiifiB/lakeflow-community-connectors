@@ -18,3 +18,10 @@ TOKEN_TIMEOUT = 30  # seconds; timeout for OAuth2 token requests
 
 DEFAULT_PAGE_SIZE = 100   # _count parameter sent to FHIR server
 DEFAULT_MAX_RECORDS = 1000  # max records per read_table() call
+
+# Bulk export constants (HL7 Bulk Data Access IG)
+BULK_POLL_INTERVAL = 30        # seconds between status poll requests
+BULK_EXPORT_TIMEOUT = 14400    # seconds (4 hours) max wait for export completion
+BULK_NDJSON_TIMEOUT = 300      # seconds; NDJSON file download timeout (files can be GBs)
+BULK_VALID_SCOPES = {"system", "patient", "group"}
+BULK_VALID_INCREMENTAL_MODES = {"since", "typefilter", "full"}

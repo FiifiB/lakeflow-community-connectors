@@ -18,7 +18,7 @@ To add a new resource:
 
 from typing import Callable
 
-from pyspark.sql.types import StringType, StructField, StructType, TimestampType
+from pyspark.sql.types import StringType, StructField, StructType, TimestampType, VariantType
 
 _SCHEMA_REGISTRY: dict = {}
 _EXTRACTOR_REGISTRY: dict = {}
@@ -31,8 +31,8 @@ _COMMON_FIELDS: list = [
     StructField("id", StringType(), nullable=True),
     StructField("resourceType", StringType(), nullable=True),
     StructField("lastUpdated", TimestampType(), nullable=True),
-    StructField("raw_json", StringType(), nullable=True),
-    StructField("extension", StringType(), nullable=True),
+    StructField("raw_json", VariantType(), nullable=True),
+    StructField("extension", VariantType(), nullable=True),
 ]
 
 FALLBACK_SCHEMA = StructType(_COMMON_FIELDS)
@@ -59,10 +59,12 @@ def register(resource_type: str, profile: str, schema: StructType) -> Callable:
         def _patient(r: dict) -> dict:
             return {...}
     """
+
     def decorator(fn: Callable) -> Callable:
         _SCHEMA_REGISTRY[(resource_type, profile)] = schema
         _EXTRACTOR_REGISTRY[(resource_type, profile)] = fn
         return fn
+
     return decorator
 
 

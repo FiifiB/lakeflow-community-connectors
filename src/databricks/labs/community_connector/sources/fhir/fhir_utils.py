@@ -20,7 +20,12 @@ import jwt  # pylint: disable=import-error
 import requests
 
 from databricks.labs.community_connector.sources.fhir.fhir_constants import (
-    HTTP_TIMEOUT, INITIAL_BACKOFF, MAX_RETRIES, PAGE_DELAY, RETRIABLE_STATUS_CODES, TOKEN_TIMEOUT,
+    HTTP_TIMEOUT,
+    INITIAL_BACKOFF,
+    MAX_RETRIES,
+    PAGE_DELAY,
+    RETRIABLE_STATUS_CODES,
+    TOKEN_TIMEOUT,
 )
 from databricks.labs.community_connector.sources.fhir.fhir_profile_registry import extract
 
@@ -38,9 +43,14 @@ class SmartAuthClient:  # pylint: disable=too-few-public-methods,too-many-instan
     """
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self, token_url: str, client_id: str, auth_type: str,
-        private_key_pem: str = "", client_secret: str = "",
-        scope: str = "", kid: str = "",
+        self,
+        token_url: str,
+        client_id: str,
+        auth_type: str,
+        private_key_pem: str = "",
+        client_secret: str = "",
+        scope: str = "",
+        kid: str = "",
         private_key_algorithm: str = "RS384",
     ) -> None:
         self._token_url = token_url
@@ -80,10 +90,13 @@ class SmartAuthClient:  # pylint: disable=too-few-public-methods,too-many-instan
             data = self._client_secret_data()
             post_kwargs = {"auth": (self._client_id, self._client_secret)}
         else:
-            raise ValueError(f"Unsupported auth_type: {self._auth_type!r}. "
-                             f"Use 'jwt_assertion', 'client_secret', or 'none'.")
+            raise ValueError(
+                f"Unsupported auth_type: {self._auth_type!r}. "
+                f"Use 'jwt_assertion', 'client_secret', or 'none'."
+            )
         resp = requests.post(
-            self._token_url, data=data,
+            self._token_url,
+            data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=TOKEN_TIMEOUT,
             **post_kwargs,
@@ -98,8 +111,12 @@ class SmartAuthClient:  # pylint: disable=too-few-public-methods,too-many-instan
     def _jwt_assertion_data(self) -> dict:
         now = datetime.now(timezone.utc)
         payload = {
-            "iss": self._client_id, "sub": self._client_id, "aud": self._token_url,
-            "jti": str(uuid.uuid4()), "iat": now, "nbf": now,
+            "iss": self._client_id,
+            "sub": self._client_id,
+            "aud": self._token_url,
+            "jti": str(uuid.uuid4()),
+            "iat": now,
+            "nbf": now,
             "exp": now + timedelta(minutes=5),
         }
         if not self._kid:
@@ -110,7 +127,8 @@ class SmartAuthClient:  # pylint: disable=too-few-public-methods,too-many-instan
             )
         jwt_headers = {"kid": self._kid, "typ": "JWT"}
         assertion = jwt.encode(
-            payload, self._private_key_pem,
+            payload,
+            self._private_key_pem,
             algorithm=self._private_key_algorithm,
             headers=jwt_headers,
         )
@@ -192,8 +210,10 @@ class FhirHttpClient:
         backoff = INITIAL_BACKOFF
         for attempt in range(MAX_RETRIES):
             resp = self._session.get(
-                url, params=params,
-                headers=self._headers(), timeout=HTTP_TIMEOUT,
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=HTTP_TIMEOUT,
             )
             if resp.status_code not in RETRIABLE_STATUS_CODES:
                 return resp
@@ -283,10 +303,10 @@ def extract_record(resource: dict, resource_type: str, profile: str = "uk_core")
         "id": resource.get("id"),
         "resourceType": resource.get("resourceType", resource_type),
         "lastUpdated": meta.get("lastUpdated"),
-        # raw_json and extension are stored as StringType (JSON strings).
-        # Downstream queries on DBR 15.3+ can use parse_json() to get VARIANT.
+        # raw_json and extension are VariantType — return JSON strings here;
+        # the framework's parse_value() converts them via VariantVal.parseJson().
         "raw_json": json.dumps(resource),
-        "extension": json.dumps(resource.get("extension")),
+        "extension": json.dumps(resource["extension"]) if "extension" in resource else None,
     }
     record.update(extract(resource, resource_type, profile))
     return record
